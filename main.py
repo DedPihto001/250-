@@ -8,7 +8,7 @@ import logging
 import re
 import sqlite3
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -298,20 +298,205 @@ def save_movies(movies: list[Movie], database_path: Path = DATABASE_PATH) -> Non
         )
 
 
+def find_movies_by_title(
+    search_term: str, database_path: Path = DATABASE_PATH
+) -> list[tuple[int, str, int, float, str, str]]:
+    term = search_term.strip()
+    if not term:
+        raise ValueError("Введите слово или часть названия для поиска.")
+    escaped_term = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    with sqlite3.connect(database_path) as connection:
+        return connection.execute(
+            """
+            SELECT rank, title, year, rating, director, url
+            FROM movies
+            WHERE title LIKE ? ESCAPE '\\' COLLATE NOCASE
+            ORDER BY rank
+            """,
+            (f"%{escaped_term}%",),
+        ).fetchall()
+
+
+def get_top_movies_after(
+    year: int = 2015,
+    limit: int = 10,
+    database_path: Path = DATABASE_PATH,
+) -> list[tuple[int, str, int, float, str]]:
+    with sqlite3.connect(database_path) as connection:
+        return connection.execute(
+            """
+            SELECT rank, title, year, rating, director
+            FROM movies
+            WHERE year > ?
+            ORDER BY rating DESC, year DESC, title
+            LIMIT ?
+            """,
+            (year, limit),
+        ).fetchall()
+
+
+def compare_title_operators(
+    search_term: str, database_path: Path = DATABASE_PATH
+) -> tuple[
+    list[tuple[int, str, int, float]],
+    list[tuple[int, str, int, float]],
+]:
+    term = search_term.strip()
+    if not term:
+        raise ValueError("Введите название или его часть для сравнения.")
+    escaped_term = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    with sqlite3.connect(database_path) as connection:
+        exact_matches = connection.execute(
+            """
+            SELECT rank, title, year, rating
+            FROM movies
+            WHERE title = ?
+            ORDER BY rank
+            """,
+            (term,),
+        ).fetchall()
+        partial_matches = connection.execute(
+            """
+            SELECT rank, title, year, rating
+            FROM movies
+            WHERE title LIKE ? ESCAPE '\\' COLLATE NOCASE
+            ORDER BY rank
+            """,
+            (f"%{escaped_term}%",),
+        ).fetchall()
+    return exact_matches, partial_matches
+
+
+def delete_movies_before_year_and_vacuum(
+    year: int = 2005, database_path: Path = DATABASE_PATH
+) -> tuple[int, int, int, int]:
+    size_before = database_path.stat().st_size
+    connection = sqlite3.connect(database_path)
+    try:
+        cursor = connection.execute("DELETE FROM movies WHERE year < ?", (year,))
+        deleted_count = cursor.rowcount
+        connection.commit()
+        connection.execute("VACUUM")
+        remaining_count = connection.execute(
+            "SELECT COUNT(*) FROM movies"
+        ).fetchone()[0]
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return deleted_count, remaining_count, size_before, database_path.stat().st_size
+
+
+def count_movies_before_year(
+    year: int = 2005, database_path: Path = DATABASE_PATH
+) -> int:
+    with sqlite3.connect(database_path) as connection:
+        return connection.execute(
+            "SELECT COUNT(*) FROM movies WHERE year < ?", (year,)
+        ).fetchone()[0]
+
+
+def print_movies(
+    movies: list[tuple[int, str, int, float, str, str]]
+    | list[tuple[int, str, int, float, str]],
+) -> None:
+    for movie in movies:
+        rank, title, year, rating = movie[:4]
+        director = f", режиссёр: {movie[4]}" if len(movie) > 4 else ""
+        url = f" — {movie[5]}" if len(movie) > 5 else ""
+        print(f"#{rank}. {title} ({year}) — {rating:.1f}{director}{url}")
+
+
+def run_menu() -> None:
+    actions = {
+        "1": "Поиск фильма по слову в названии",
+        "2": "Топ-10 фильмов после 2015 года по рейтингу",
+        "3": "Сравнить поиск операторов = и LIKE",
+        "4": "Удалить фильмы старше 2005 года и выполнить VACUUM",
+        "5": "Выход",
+    }
+    while True:
+        print("\nIMDb Top 250 — база фильмов")
+        for key, label in actions.items():
+            print(f"{key}. {label}")
+        choice = input("Выберите пункт меню: ").strip()
+
+        if choice == "1":
+            try:
+                movies = find_movies_by_title(input("Слово в названии: "))
+            except ValueError as error:
+                print(error)
+                continue
+            if movies:
+                print_movies(movies)
+            else:
+                print("Фильмы не найдены.")
+        elif choice == "2":
+            movies = get_top_movies_after()
+            if movies:
+                print_movies(movies)
+            else:
+                print("После 2015 года фильмов в базе не найдено.")
+        elif choice == "3":
+            try:
+                exact, partial = compare_title_operators(
+                    input("Название или его часть: ")
+                )
+            except ValueError as error:
+                print(error)
+                continue
+            print(f"\nОператор = (точное совпадение): найдено {len(exact)}")
+            print_movies(exact)
+            print(f"\nОператор LIKE (частичное совпадение): найдено {len(partial)}")
+            print_movies(partial)
+        elif choice == "4":
+            count = count_movies_before_year()
+            print(f"Будет удалено фильмов: {count}.")
+            if input("Продолжить? (y/N): ").strip().lower() != "y":
+                print("Удаление отменено.")
+                continue
+            deleted, remaining, size_before, size_after = (
+                delete_movies_before_year_and_vacuum()
+            )
+            print(
+                f"Удалено: {deleted}; осталось: {remaining}. "
+                f"Размер БД: {size_before} -> {size_after} байт после VACUUM."
+            )
+        elif choice == "5":
+            print("До свидания!")
+            return
+        else:
+            print("Выберите пункт меню от 1 до 5.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Parse IMDb Top 250 and save it to SQLite."
+        description="Browse the IMDb SQLite database or refresh it from IMDb."
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--scrape",
+        action="store_true",
+        help="Download the current IMDb Top 250 and replace database contents.",
+    )
+    mode.add_argument(
         "--input-json",
         type=Path,
         help="Import previously parsed movie records from a JSON file.",
     )
     args = parser.parse_args()
 
-    movies = load_json(args.input_json) if args.input_json else scrape_top_250()
-    save_movies(movies)
-    LOGGER.info("Saved %s movies to %s", len(movies), DATABASE_PATH)
+    if args.input_json:
+        movies = load_json(args.input_json)
+        save_movies(movies)
+        LOGGER.info("Saved %s movies to %s", len(movies), DATABASE_PATH)
+    elif args.scrape:
+        movies = scrape_top_250()
+        save_movies(movies)
+        LOGGER.info("Saved %s movies to %s", len(movies), DATABASE_PATH)
+    else:
+        run_menu()
 
 
 if __name__ == "__main__":
