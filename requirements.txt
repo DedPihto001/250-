@@ -1,0 +1,3 @@
+# Установите зависимости командой: python -m pip install -r requirements.txt
+requests==2.32.3
+beautifulsoup4>=4.12,<5
